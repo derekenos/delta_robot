@@ -150,7 +150,7 @@ class Carriage(object):
             raise UnknownCarriagePosition
 
         z_delta = z - self.z
-        error = z_delta % self.stepper.MM_PER_STEP
+        error = z_delta % copysign(self.stepper.MM_PER_STEP, z_delta)
         return z_delta, error
 
 
@@ -165,7 +165,7 @@ class Carriage(object):
 
         self.stepper.step(DOWN if z_delta > 0 else UP)
         self.z += copysign(self.stepper.MM_PER_STEP, z_delta)
-        return self.z == z + error
+        return abs(self.z - z) < abs(error)
 
 
 A, B, C = 'A', 'B', 'C'
@@ -188,6 +188,7 @@ class DeltaRobot(object):
             C: None,
         }
         self.step_timer = TIMERS['DELTA_ROBOT_STEP']
+        self.stepping = False
 
 
     def step_toward_targets(self, timer):
@@ -212,6 +213,7 @@ class DeltaRobot(object):
 
         if num_stepped == 0:
             timer.deinit()
+            self.stepping = False
 
 
     def move_to_targets(self, A_target, B_target, C_target):
@@ -221,6 +223,7 @@ class DeltaRobot(object):
 
         self.step_timer.init(period=1, mode=Timer.PERIODIC,
                              callback=self.step_toward_targets)
+        self.stepping = True
 
 
     def home(self):
@@ -236,6 +239,14 @@ class DeltaRobot(object):
         Az, Bz, Cz = invert_for_tower(*calc_carriage_z_for_point(x, y, z))
 
         self.move_to_targets(Az, Bz, Cz)
+
+
+    def move_to_sequence(self, coords):
+        for coord in coords:
+            self.move_to_point(*coord)
+
+            while self.stepping:
+                sleep_ms(1)
 
 
     def off(self):
