@@ -9,8 +9,12 @@ circumference = 2 * 3.1415926 * (12 / 2) = 37.7 mm
 
 """
 
+from math import copysign
 
-from machine import Pin
+from machine import (
+    Pin,
+    Timer,
+)
 from time import (
     ticks_ms,
     sleep_ms,
@@ -20,7 +24,7 @@ from time import (
 UP = FORWARD = 0
 DOWN = REVERSE = 1
 
-LIMIT_SWITCH_INACTIVE = 1
+AT_LIMIT = 0
 
 OFF_COIL_STATES = (0, 0, 0, 0)
 
@@ -97,17 +101,40 @@ class Stepper(object):
         self.set_coil_states(*self.COIL_STATE_SEQUENCE[next_index])
 
 
-class Carriage(object):
+class CarriageError(Exception): pass
 
+class UnknownCarriagePosition(CarriageError): pass
+
+
+class Carriage(object):
     def __init__(self, stepper, limit_sw_pin_num):
         self.stepper = stepper
         self.limit_switch_pin = Pin(limit_sw_pin_num, Pin.IN, Pin.PULL_UP)
+        self.z = None
+        self.z_error = 0
+
+
+    def go_home(self):
+        while self.limit_switch_pin.value() != AT_LIMIT:
+            self.stepper.step(UP)
+        self.stepper.off()
+        self.z = 0
+        self.z_error = 0
+
+        # TODO - use hardware interrupts to detect when home
+
+
+    def step_toward_home(self):
+        if self.limit_switch_pin.value() != AT_LIMIT:
+            self.stepper.step(UP)
+            return False
+        self.z = 0
+        self.z_error = 0
+        return True
 
 
     def move_mm(self, mm, direction):
         num_steps = int(mm / self.stepper.MM_PER_STEP)
-
-        print('num_steps: {}'.format(num_steps))
 
         while num_steps:
             self.stepper.step(direction)
@@ -115,26 +142,113 @@ class Carriage(object):
         self.stepper.off()
 
 
-    def go_home(self):
-        while self.limit_switch_pin.value() == LIMIT_SWITCH_INACTIVE:
-            self.stepper.step(UP)
-        self.stepper.off()
+    def get_z_delta(self, z):
+        """Return the delta to the specified z and the error in precision
+        given the minimum stepper step distance.
+        """
+        if self.z is None:
+            raise UnknownCarriagePosition
 
+        z_delta = z - self.z
+        error = z_delta % self.stepper.MM_PER_STEP
+        return z_delta, error
+
+
+    def step_toward_z(self, z):
+        """Take one step toward the specified z value and return a boolean
+        indicating whether we've reached it.
+        """
+        z_delta, error = self.get_z_delta(z)
+        # TODO - accumulate the error value to use for compensation.
+        if z_delta == 0:
+            return True
+
+        self.stepper.step(DOWN if z_delta > 0 else UP)
+        self.z += copysign(self.stepper.MM_PER_STEP, z_delta)
+        return self.z == z + error
+
+
+A, B, C = 'A', 'B', 'C'
+HOME = -1
+
+TIMERS = {
+    'DELTA_ROBOT_STEP': Timer(0),
+}
+
+class DeltaRobot(object):
+    def __init__(self, carriage_A, carriage_B, carriage_C):
+        self.carriages = {
+            A: carriage_A,
+            B: carriage_B,
+            C: carriage_C,
+        }
+        self.carriage_targets = {
+            A: None,
+            B: None,
+            C: None,
+        }
+        self.step_timer = TIMERS['DELTA_ROBOT_STEP']
+
+
+    def step_toward_targets(self, timer):
+        carriage_targets = self.carriage_targets
+
+        num_stepped = 0
+        for name, carriage in self.carriages.items():
+            target = carriage_targets[name]
+            if target is None:
+                continue
+
+            if target == HOME:
+                done = carriage.step_toward_home()
+            else:
+                done = carriage.step_toward_z(target)
+
+            if done:
+                carriage_targets[name] = None
+                carriage.stepper.off()
+
+            num_stepped += 1
+
+        if num_stepped == 0:
+            timer.deinit()
+
+
+    def move_to_targets(self, A_target, B_target, C_target):
+        self.carriage_targets['A'] = A_target
+        self.carriage_targets['B'] = B_target
+        self.carriage_targets['C'] = C_target
+
+        self.step_timer.init(period=1, mode=Timer.PERIODIC,
+                             callback=self.step_toward_targets)
+
+
+    def home(self):
+        self.move_to_targets(HOME, HOME, HOME)
+
+
+    def move_to_point(self, x, y, z):
+        from kinematics import (
+            calc_carriage_z_for_point,
+            invert_for_tower
+        )
+
+        Az, Bz, Cz = invert_for_tower(*calc_carriage_z_for_point(x, y, z))
+
+        self.move_to_targets(Az, Bz, Cz)
+
+
+    def off(self):
+        self.step_timer.deinit()
+        for carriage in self.carriages.values():
+            carriage.stepper.off()
 
 
 ###############################################################################
 
-def demo():
-    carriageA = Carriage(Stepper((16, 17, 18, 19)), limit_sw_pin_num=23)
-    carriageB = Carriage(Stepper((21, 2, 4, 5)), limit_sw_pin_num=26)
-    carriageC = Carriage(Stepper((13, 12, 14, 27)), limit_sw_pin_num=15)
 
-    carriageA.go_home()
-    carriageB.go_home()
-    carriageC.go_home()
-
-    n = 40
-    while n:
-        for c in (carriageA, carriageB, carriageC):
-            c.move_mm(2, DOWN)
-        n -= 1
+delta_robot = DeltaRobot(
+    carriage_A=Carriage(Stepper((16, 17, 18, 19)), limit_sw_pin_num=23),
+    carriage_B=Carriage(Stepper((2, 4, 5, 21)), limit_sw_pin_num=26),
+    carriage_C=Carriage(Stepper((13, 12, 14, 27)), limit_sw_pin_num=15),
+)
