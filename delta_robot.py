@@ -11,22 +11,24 @@ circumference = 2 * 3.1415926 * (12 / 2) = 37.7 mm
 
 from math import copysign
 
+from micropython import alloc_emergency_exception_buf
 from machine import (
     Pin,
     Timer,
 )
-from time import (
-    ticks_ms,
+from utime import (
     sleep_ms,
+    ticks_ms,
 )
 
 
+OFF_COIL_STATES = (0, 0, 0, 0)
+
+HOME = -1
+A, B, C = 'A', 'B', 'C'
+
 UP = FORWARD = 0
 DOWN = REVERSE = 1
-
-AT_LIMIT = 0
-
-OFF_COIL_STATES = (0, 0, 0, 0)
 
 FULL_STEP_COIL_STATE_SEQUENCE = (
     (1, 1, 0, 0),
@@ -34,6 +36,14 @@ FULL_STEP_COIL_STATE_SEQUENCE = (
     (0, 0, 1, 1),
     (1, 0, 0, 1),
 )
+
+
+DELTA_ROBOT_STEP_TIMER = Timer(0)
+
+
+# Allocate a Micropython exception buffer to ensure that ISR-related errorr are
+# reported. See: https://docs.micropython.org/en/latest/reference/isr_rules.html#the-emergency-exception-buffer
+alloc_emergency_exception_buf(100)
 
 
 class Stepper(object):
@@ -107,25 +117,44 @@ class UnknownCarriagePosition(CarriageError): pass
 
 
 class Carriage(object):
-    def __init__(self, stepper, limit_sw_pin_num):
+
+    LIMIT_SWITCH_ACTIVE_VALUE = 0
+
+    def __init__(self, stepper, limit_sw_pin_num, name):
         self.stepper = stepper
         self.limit_switch_pin = Pin(limit_sw_pin_num, Pin.IN, Pin.PULL_UP)
-        self.z = None
+        self.name = name
+
+        self.at_limit = None
+        # Invoked the ISR to set at_limit value.
+        self.limit_switch_irq_handler(self.limit_switch_pin)
+
+        self.z = 0 if self.at_limit else None
         self.z_error = 0
 
+        self.limit_switch_pin.irq(
+            trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING,
+            handler=self.limit_switch_irq_handler,
+        )
 
-    def go_home(self):
-        while self.limit_switch_pin.value() != AT_LIMIT:
+
+    def limit_switch_irq_handler(self, limit_switch_pin):
+        self.at_limit = limit_switch_pin.value() == \
+                        self.LIMIT_SWITCH_ACTIVE_VALUE
+
+        print('Carriage: {}, at_limit: {}'.format(self.name, self.at_limit))
+
+
+    def home(self):
+        while not self.at_limit:
             self.stepper.step(UP)
         self.stepper.off()
         self.z = 0
         self.z_error = 0
 
-        # TODO - use hardware interrupts to detect when home
-
 
     def step_toward_home(self):
-        if self.limit_switch_pin.value() != AT_LIMIT:
+        if not self.at_limit:
             self.stepper.step(UP)
             return False
         self.z = 0
@@ -168,13 +197,6 @@ class Carriage(object):
         return abs(self.z - z) < abs(error)
 
 
-A, B, C = 'A', 'B', 'C'
-HOME = -1
-
-TIMERS = {
-    'DELTA_ROBOT_STEP': Timer(0),
-}
-
 class DeltaRobot(object):
     def __init__(self, carriage_A, carriage_B, carriage_C):
         self.carriages = {
@@ -187,7 +209,8 @@ class DeltaRobot(object):
             B: None,
             C: None,
         }
-        self.step_timer = TIMERS['DELTA_ROBOT_STEP']
+        self.xyz = (None, None, None)
+        self.step_timer = DELTA_ROBOT_STEP_TIMER
         self.stepping = False
 
 
@@ -239,6 +262,7 @@ class DeltaRobot(object):
         Az, Bz, Cz = invert_for_tower(*calc_carriage_z_for_point(x, y, z))
 
         self.move_to_targets(Az, Bz, Cz)
+        self.xyz = (x, y, z)
 
 
     def move_to_sequence(self, coords):
@@ -259,7 +283,7 @@ class DeltaRobot(object):
 
 
 delta_robot = DeltaRobot(
-    carriage_A=Carriage(Stepper((16, 17, 18, 19)), limit_sw_pin_num=23),
-    carriage_B=Carriage(Stepper((2, 4, 5, 21)), limit_sw_pin_num=26),
-    carriage_C=Carriage(Stepper((13, 12, 14, 27)), limit_sw_pin_num=15),
+    carriage_A=Carriage(Stepper((16, 17, 18, 19)), 23, 'A'),
+    carriage_B=Carriage(Stepper((2, 4, 5, 21)), 26, 'B'),
+    carriage_C=Carriage(Stepper((13, 12, 14, 27)), 15, 'C'),
 )
