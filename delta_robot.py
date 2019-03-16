@@ -39,7 +39,6 @@ FULL_STEP_COIL_STATE_SEQUENCE = (
 
 
 DELTA_ROBOT_MOTION_TIMER = Timer(0)
-CARRIAGE_LIMIT_SWITCH_DEBOUNCE_TIMER = Timer(1)
 
 
 # Allocate a Micropython exception buffer to ensure that ISR-related errorr are
@@ -120,69 +119,27 @@ class UnknownCarriagePosition(CarriageError): pass
 class Carriage(object):
 
     LIMIT_SWITCH_ACTIVE_VALUE = 0
-    LIMIT_SWITCH_DEBOUNCE_TICKS = 30
-    LIMIT_SWITCH_DEBOUNCE_TICK_PERIOD = 1
-
-    debounce_timer = CARRIAGE_LIMIT_SWITCH_DEBOUNCE_TIMER
-    debounce_name_carriage_map = {}
-
-
-    @classmethod
-    def tick_debounce(cls, timer):
-        for name, carriage in list(cls.debounce_name_carriage_map.items()):
-            if carriage.limit_switch_debounce_ticks_remaining > 0:
-                carriage.limit_switch_debounce_ticks_remaining -= 1
-                if carriage.limit_switch_debounce_ticks_remaining == 0:
-                    del cls.debounce_name_carriage_map[carriage.name]
-        if not cls.debounce_name_carriage_map:
-            timer.deinit()
-
-
-    @classmethod
-    def start_debouncing(cls, carriage):
-        debounce_name_carriage_map = cls.debounce_name_carriage_map
-        debounce_name_carriage_map[carriage.name] = carriage
-        if len(debounce_name_carriage_map) == 1:
-            cls.debounce_timer.init(period=1, mode=Timer.PERIODIC,
-                                    callback=cls.tick_debounce)
-
 
     def __init__(self, stepper, limit_sw_pin_num, name):
         self.stepper = stepper
         self.limit_switch_pin = Pin(limit_sw_pin_num, Pin.IN, Pin.PULL_UP)
         self.name = name
 
-        self.at_limit = self.limit_switch_pin.value() == \
-                        self.LIMIT_SWITCH_ACTIVE_VALUE
-        self.limit_switch_debounce_ticks_remaining = 0
-        self.enable_limit_switch_interrupts()
+        self.at_limit = None
+        self.update_at_limit()
 
         self.z = 0 if self.at_limit else None
         self.z_error = 0
 
 
-    def enable_limit_switch_interrupts(self):
-        self.limit_switch_pin.irq(
-            trigger=Pin.IRQ_RISING | Pin.IRQ_FALLING,
-            handler=self.limit_switch_irq_handler,
-        )
-
-
-    def limit_switch_irq_handler(self, limit_switch_pin):
-        if self.limit_switch_debounce_ticks_remaining > 0:
-            return
-
-        self.at_limit = not self.at_limit
-
-        self.limit_switch_debounce_ticks_remaining = \
-            self.LIMIT_SWITCH_DEBOUNCE_TICKS
-
-        Carriage.start_debouncing(self)
-
-        print('Carriage: {}, at_limit: {}'.format(self.name, self.at_limit))
+    def update_at_limit(self):
+        self.at_limit = self.limit_switch_pin.value() == \
+                        self.LIMIT_SWITCH_ACTIVE_VALUE
 
 
     def step_stepper(self, direction):
+        self.update_at_limit()
+
         if direction == UP and self.at_limit:
             self.z = 0
             self.z_error = 0
