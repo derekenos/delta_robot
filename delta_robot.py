@@ -21,6 +21,12 @@ from utime import (
     ticks_ms,
 )
 
+from planner import LinearPathPlanner
+from kinematics import (
+    calc_carriage_z_for_point,
+    invert_for_tower,
+)
+
 
 OFF_COIL_STATES = (0, 0, 0, 0)
 
@@ -234,6 +240,13 @@ class DeltaRobot(object):
             if target is None:
                 continue
 
+            if target != HOME:
+                old_acc = self.carriage_accs[name]
+                new_acc = self.carriage_accs[name] = \
+                    old_acc + self.carriage_acc_incs[name]
+                if int(new_acc) == int(old_acc):
+                    continue
+
             if target == HOME:
                 done = carriage.step_toward_home()
             else:
@@ -262,26 +275,44 @@ class DeltaRobot(object):
         self.carriage_targets['A'] = A_target
         self.carriage_targets['B'] = B_target
         self.carriage_targets['C'] = C_target
+
+        # Calculate the absolute deltas for each carriage.
+        a_delta = abs(A_target - (self.carriages['A'].z or 0))
+        b_delta = abs(B_target - (self.carriages['B'].z or 0))
+        c_delta = abs(C_target - (self.carriages['C'].z or 0))
+
+        # Get max delta.
+        max_delta = max(a_delta, b_delta, c_delta)
+
+        # Calculate step scales.
+        self.carriage_acc_incs = {
+            'A': a_delta / max_delta,
+            'B': b_delta / max_delta,
+            'C': c_delta / max_delta,
+        }
+        self.carriage_accs = {
+            'A': 0,
+            'B': 0,
+            'C': 0,
+        }
+
         self.start_moving()
 
 
     def home(self):
         self.move_to_targets(HOME, HOME, HOME)
+        self.xyz = 0, 0, 0
 
 
-    def move_to_point(self, x, y, z):
-        from kinematics import (
-            calc_carriage_z_for_point,
-            invert_for_tower
-        )
-
-        Az, Bz, Cz = invert_for_tower(*calc_carriage_z_for_point(x, y, z))
-
-        self.move_to_targets(Az, Bz, Cz)
+    def move_to_point(self, x, y, z, planner=LinearPathPlanner):
+        _x, _y, _ = self.xyz
+        for x, y in planner.get_xy_path(_x, _y, x, y):
+            Az, Bz, Cz = invert_for_tower(*calc_carriage_z_for_point(x, y, z))
+            self.move_to_targets(Az, Bz, Cz)
         self.xyz = (x, y, z)
 
 
-    def move_to_sequence(self, coords):
+    def move_to_sequence(self, coords, planner=LinearPathPlanner):
         for coord in coords:
             self.move_to_point(*coord)
 
