@@ -314,7 +314,7 @@ class DeltaRobot(object):
 
     def move_to_sequence(self, coords, planner=LinearPathPlanner):
         for coord in coords:
-            self.move_to_point(*coord)
+            self.move_to_point(*coord, planner=planner)
 
             while self.moving:
                 sleep_ms(1)
